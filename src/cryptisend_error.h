@@ -1,0 +1,11 @@
+#ifndef __CRYPTISEND_ERROR_H__
+#define	__CRYPTISEND_ERROR_H__
+
+enum CTCDError {
+	CTCD_ERR_SUCCESS		= 0,
+	CTCD_ERR_MEMORY			= 1,
+	CTCD_ERR_CONNECT		= 2,
+	CTCD_ERR_SSL_NEG_FAIL		= 3,
+};
+
+#endif
