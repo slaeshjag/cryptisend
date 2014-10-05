@@ -3,7 +3,7 @@
 
 int socket_accept(int socket) {
 	struct sockaddr_in addr;
-	int len = sizeof(addr);
+	unsigned int len = sizeof(addr);
 
 	return accept(socket, (struct sockaddr *) &addr, &len);
 }

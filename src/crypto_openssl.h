@@ -16,7 +16,7 @@ struct CTCDCryptoConn {
 };
 
 int crypto_global_init();
-struct CTCDCryptoConn *crypto_connection_close(CTCDCryptoConn *conn);
+struct CTCDCryptoConn *crypto_connection_close(struct CTCDCryptoConn *conn);
 struct CTCDCryptoConn *crypto_connection_apply(enum CTCDError *err, int sock);
 struct CTCDCryptoConn *crypto_connection_open(char *hostname, enum CTCDError *err);
 
