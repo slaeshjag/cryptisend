@@ -1,4 +1,5 @@
 #include <stdlib.h>
+#include <sys/stat.h>
 #include "crypto_openssl.h"
 
 /* Crypto_OpenSSL will *NOT* work with WinSuck, will probably use FailAPI stuff for that. */
@@ -26,13 +27,53 @@ struct CTCDCryptoConn *crypto_connection_close(struct CTCDCryptoConn *conn) {
 }
 
 
+static int crypto_key_generate(const char *path) {
+	RSA *rsa;
+	FILE *out;
+	BIO *out_bio;
+	mode_t mask;
+
+	fprintf(stderr, "Generating private key. This might take a while...\n");
+	
+	rsa = RSA_generate_key(4096, RSA_F4, NULL, NULL);
+	
+	/* Don't clear any old private key until we've generated a new one */
+	mask = umask(077);
+	if (!(out = fopen(path, "w"))) {
+		RSA_free(rsa);
+		return 0;
+	}
+	umask(mask);
+	
+	out_bio = BIO_new(BIO_s_file());
+	BIO_set_fp(out_bio, out, BIO_NOCLOSE);
+	
+	PEM_write_bio_RSAPrivateKey(out_bio, rsa, NULL, NULL, 0, NULL, NULL);
+	BIO_free(out_bio);
+	fclose(out);
+	RSA_free(rsa);
+	
+	return 1;
+}
+
+
+static EVP_PKEY *crypto_privatekey_read(const char *path) {
+	BIO *key;
+	EVP_PKEY *pkey;
+
+	key = BIO_new(BIO_s_file());
+	if (BIO_read_filename(key, path) <= 0)
+		return NULL;
+	pkey = PEM_read_bio_PrivateKey(key, NULL, NULL, NULL);
+	BIO_free(key);
+	return pkey;
+}
+
+
 /* This whole convoluted mess generates a bogous certificate, which is for whatever reason	**
 **	required for OpenSSL to work at all. It provides no security what so ever, it's just	**
 **	"needed."										*/
-static int crypto_certificate_generate() {
-	/* Key generation */
-	EVP_PKEY *pkey;
-	RSA *rsa;
+static int crypto_certificate_generate(EVP_PKEY *pkey, const char *path) {
 	/* Request generation */
 	X509_REQ *req;
 	X509_NAME *req_name;
@@ -43,20 +84,14 @@ static int crypto_certificate_generate() {
 	BIGNUM *serial_num;
 	ASN1_INTEGER *serial;
 	X509 *cert;
-
-
-	/* Generate private key */
-	pkey = EVP_PKEY_new();
-	rsa = RSA_generate_key(4096, RSA_F4, NULL, NULL);
-	EVP_PKEY_set1_RSA(pkey, rsa);
-	RSA_free(rsa), rsa = NULL;
+	FILE *fp;
 
 	/* Generate a request */
 	req_name = X509_NAME_new();
 	X509_APPEND_ENTRY(req_name, "CN", "Arne");
 
 	req = X509_REQ_new();
-	X509_REQ_set_version(req, 0);
+	X509_REQ_set_version(req, BIO_NOCLOSE);
 	
 	if (!(X509_REQ_set_subject_name(req, req_name))) {
 		fprintf(stderr, "Unable to set subject name\n");
@@ -75,8 +110,6 @@ static int crypto_certificate_generate() {
 	if (X509_REQ_sign_ctx(req, &mctx) <= 0)
 		fprintf(stderr, "X509_sign_ctx() failed\n");
 	EVP_MD_CTX_cleanup(&mctx);
-	out_bio = BIO_new(BIO_s_file());
-	BIO_set_fp(out_bio, stdout, BIO_NOCLOSE);
 
 	if (X509_REQ_verify(req, pkey) <= 0) {
 		fprintf(stderr, "Signature verification fail\n");
@@ -102,11 +135,36 @@ static int crypto_certificate_generate() {
 	
 	X509_set_issuer_name(cert, X509_get_subject_name(cert));
 	X509_sign(cert, pkey, EVP_sha512());
+	
+	/* Output file */
+	out_bio = BIO_new(BIO_s_file());
+	fp = fopen(path, "w");
+	BIO_set_fp(out_bio, fp, 0);
 
 	PEM_write_bio_X509(out_bio, cert);
-
+	BIO_free(out_bio);
+	fclose(fp);
 
 	return 0;
+}
+
+
+static EVP_PKEY *crypto_pkey_load(const char *path) {
+	EVP_PKEY *pkey;
+	
+	/* Load/generate private key */
+	if (!(pkey = crypto_privatekey_read(path)))
+		if (!crypto_key_generate(path)) {
+			fprintf(stderr, "Unable to generate a private key\n");
+			return NULL;
+		}
+
+	if (!(pkey = crypto_privatekey_read(path))) {
+		fprintf(stderr, "Unable to load the private key\n");
+		return NULL;
+	}
+
+	return pkey;
 }
 
 
@@ -137,6 +195,7 @@ static struct CTCDCryptoConn *crypto_socket_new(enum CTCDError *err, int server)
 
 struct CTCDCryptoConn *crypto_connection_apply(enum CTCDError *err, int sock) {
 	struct CTCDCryptoConn *conn;
+	EVP_PKEY *pkey;
 	
 	if (!err)
 		return NULL;
@@ -145,28 +204,13 @@ struct CTCDCryptoConn *crypto_connection_apply(enum CTCDError *err, int sock) {
 
 	conn->sock = sock;
 	
-	#if 0
-	/* Generate DHparams */
-	fprintf(stderr, "Generating DH params\n");
-	DH *dh = DH_new();
-	DH_generate_parameters_ex(dh, 205, 2, NULL);
-	SSL_CTX_set_tmp_dh(conn->ctx, dh);
+	pkey = crypto_pkey_load("/tmp/private.key");
+	crypto_certificate_generate(pkey, "/tmp/private.cert");
 
-	/* Set RSA key */
-	fprintf(stderr, "Generating RSA key\n");
-	rsa = RSA_generate_key(4096, RSA_F4, NULL, NULL);
-	SSL_CTX_set_tmp_rsa(conn->ctx, rsa);
-	RSA_free(rsa);
-
-	fprintf(stderr, "Keys generated\n");
+	SSL_CTX_use_PrivateKey(conn->ctx, pkey);
+	SSL_CTX_use_certificate_file(conn->ctx, "/tmp/private.cert", SSL_FILETYPE_PEM);
 	ERR_print_errors_fp(stderr);
-	#endif
 
-	crypto_certificate_generate();
-
-
-	SSL_CTX_use_certificate_file(conn->ctx, "/tmp/server.crt", SSL_FILETYPE_PEM);
-	SSL_CTX_use_PrivateKey_file(conn->ctx, "/tmp/server.key", SSL_FILETYPE_PEM);
 	SSL_CTX_set_cipher_list(conn->ctx, "ALL");
 
 	conn->ssl = SSL_new(conn->ctx);
